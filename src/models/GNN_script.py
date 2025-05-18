@@ -93,6 +93,26 @@ def split_masks(data, split=(0.7, 0.15, 0.15), seed=42):
 split_masks(data)
 
 
+class FocalLoss(torch.nn.Module):
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha  # tensor of shape [num_classes] or None
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, input, target):
+        ce_loss = F.cross_entropy(input, target, weight=self.alpha, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = (1 - pt) ** self.gamma * ce_loss
+
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+
 class HeteroGNN(torch.nn.Module):
     def __init__(self, metadata, hidden_channels, out_channels, dropout, num_hosts, embedding_dim=32):
         super().__init__()
@@ -180,7 +200,7 @@ def evaluate_accuracy(model, data, split='val'):
 
 
 def objective(trial):
-    hidden_channels = trial.suggest_categorical('hidden_channels', [16, 32, 64, 128])
+    hidden_channels = trial.suggest_categorical('hidden_channels', [16, 32])
     dropout = trial.suggest_float('dropout', 0.0, 0.5)
     lr = trial.suggest_loguniform('lr', 1e-4, 1e-2)
 
@@ -197,7 +217,7 @@ def objective(trial):
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = torch.nn.CrossEntropyLoss(weight=class_weights_tensor)
+    criterion = FocalLoss(alpha=class_weights_tensor, gamma=2.0)
 
     writer = SummaryWriter(log_dir=f"Parameter_Databases/Tensorboard/{trial.number}")
 
@@ -286,7 +306,7 @@ def train_and_return_f1(best_params, model_class, data, device='cuda', num_epoch
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = torch.nn.CrossEntropyLoss(weight=class_weights_tensor)
+    criterion = FocalLoss(alpha=class_weights_tensor, gamma=2.0)
 
     writer = SummaryWriter(log_dir=f"Parameter_Databases/Tensorboard/final_model")
 
