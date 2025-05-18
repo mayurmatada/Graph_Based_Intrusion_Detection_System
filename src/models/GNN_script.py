@@ -1,3 +1,6 @@
+from sklearn.metrics import accuracy_score
+from torch.nn import Linear, Embedding
+from torch_geometric.nn import SAGEConv, HeteroConv
 import optuna
 import os
 from datetime import datetime
@@ -21,6 +24,7 @@ from torch_geometric.loader import NeighborLoader
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.set_float32_matmul_precision('high')
 torch.manual_seed(42)
+
 
 # Load data
 X = pl.read_parquet("data/Processed_and_split/Processed_X.parquet")
@@ -92,14 +96,21 @@ split_masks(data)
 class HeteroGNN(torch.nn.Module):
     def __init__(self, metadata, hidden_channels, out_channels, dropout, num_hosts, embedding_dim=32):
         super().__init__()
-        self.host_embedding = torch.nn.Embedding(num_hosts, embedding_dim)
+        self.host_embedding = Embedding(num_hosts, embedding_dim)
+        torch.nn.init.xavier_uniform_(self.host_embedding.weight)
+        from torch.nn import BatchNorm1d
 
+        self.norm = torch.nn.ModuleDict({
+            node_type: BatchNorm1d(hidden_channels)
+            for node_type in ['flow', 'host']
+        })
         self.conv1 = HeteroConv({
-            ('host', 'src_of', 'flow'): GATConv((embedding_dim, flow_features.shape[1]), hidden_channels, add_self_loops=False),
-            ('host', 'dst_of', 'flow'): GATConv((embedding_dim, flow_features.shape[1]), hidden_channels, add_self_loops=False),
-            ('flow', 'rev_src_of', 'host'): GATConv((flow_features.shape[1], embedding_dim), hidden_channels, add_self_loops=False),
-            ('flow', 'rev_dst_of', 'host'): GATConv((flow_features.shape[1], embedding_dim), hidden_channels, add_self_loops=False),
+            ('host', 'src_of', 'flow'): SAGEConv((embedding_dim, flow_features.shape[1]), hidden_channels),
+            ('host', 'dst_of', 'flow'): SAGEConv((embedding_dim, flow_features.shape[1]), hidden_channels),
+            ('flow', 'rev_src_of', 'host'): SAGEConv((flow_features.shape[1], embedding_dim), hidden_channels),
+            ('flow', 'rev_dst_of', 'host'): SAGEConv((flow_features.shape[1], embedding_dim), hidden_channels),
         }, aggr='sum')
+
         self.lin = Linear(hidden_channels, out_channels)
         self.dropout = dropout
 
@@ -111,6 +122,7 @@ class HeteroGNN(torch.nn.Module):
         x_dict['flow'] = x_dict['flow'].to(device=device, dtype=dtype)
 
         x_dict = self.conv1(x_dict, edge_index_dict)
+        x_dict = {k: self.norm[k](v) for k, v in x_dict.items()}
         x_dict = {k: F.relu(v) for k, v in x_dict.items()}
         x_dict = {k: F.dropout(v, p=self.dropout, training=self.training) for k, v in x_dict.items()}
 
@@ -156,8 +168,19 @@ def evaluate_f1(model, data, split='val'):
         return f1_score(labels, preds, average='macro')
 
 
+def evaluate_accuracy(model, data, split='val'):
+    model.eval()
+    with torch.no_grad():
+        x_dict = {k: v.to(device=device) for k, v in data.x_dict.items()}
+        out = model(x_dict, data.edge_index_dict)
+        mask = data['flow'][f"{split}_mask"]
+        preds = out['flow'][mask].argmax(dim=1).cpu()
+        labels = data['flow'].y[mask].cpu()
+        return accuracy_score(labels, preds)
+
+
 def objective(trial):
-    hidden_channels = trial.suggest_categorical('hidden_channels', [16, 32])
+    hidden_channels = trial.suggest_categorical('hidden_channels', [16, 32, 64, 128])
     dropout = trial.suggest_float('dropout', 0.0, 0.5)
     lr = trial.suggest_loguniform('lr', 1e-4, 1e-2)
 
@@ -179,20 +202,23 @@ def objective(trial):
     writer = SummaryWriter(log_dir=f"Parameter_Databases/Tensorboard/{trial.number}")
 
     best_val_f1 = 0
+    best_val_acc = 0
     best_epoch = 0
-    patience = 20
+    patience = 100
     max_epochs = 400
 
     for epoch in range(1, max_epochs + 1):
         loss = train(model, data, optimizer, criterion)
         val_f1 = evaluate_f1(model, data, split='val')
+        val_acc = evaluate_accuracy(model, data, split='val')
 
-        if epoch % 5 == 0:
-            writer.add_scalar("Loss/train", loss, epoch)
-            writer.add_scalar("F1/val", val_f1, epoch)
+        writer.add_scalar("Loss/train", loss, epoch)
+        writer.add_scalar("F1/val", val_f1, epoch)
+        writer.add_scalar("Accuracy/val", val_acc, epoch)
 
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
+            best_val_acc = val_acc
             best_epoch = epoch
 
         if epoch - best_epoch >= patience:
@@ -200,6 +226,19 @@ def objective(trial):
             break
 
         logging.info(f"Trial {trial.number} Epoch {epoch:03d} | Loss: {loss:.4f} | Val F1: {val_f1:.4f}")
+
+    # Log hyperparameters and final metrics
+    writer.add_hparams(
+        {
+            'hidden_channels': hidden_channels,
+            'dropout': dropout,
+            'lr': lr
+        },
+        {
+            'hparam/val_f1': best_val_f1,
+            'hparam/val_acc': best_val_acc
+        }
+    )
 
     writer.flush()
     writer.close()
@@ -298,5 +337,6 @@ model, test_f1 = train_and_return_f1(
     model_class=HeteroGNN,
     data=data,
     device='cuda'
+
 )
 logging.info(f"Best hyperparameters: {study.best_params}")
