@@ -21,6 +21,8 @@ import torch
 from torch_geometric.data import HeteroData
 import gc
 from torch_geometric.loader import NeighborLoader
+from torch.amp.autocast_mode import autocast
+from torch.amp.grad_scaler import GradScaler
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.set_float32_matmul_precision('high')
@@ -30,7 +32,6 @@ torch.manual_seed(42)
 # Load data
 X = pl.read_parquet("data/Processed_and_split/Processed_X.parquet")
 y = pl.read_parquet("data/Processed_and_split/Processed_y.parquet")
-
 src_ips = X['Source IP'].unique()
 dest_ips = X['Destination IP'].unique()
 unique_hosts = list(set(src_ips) | set(dest_ips))
@@ -115,11 +116,12 @@ class FocalLoss(torch.nn.Module):
 
 
 class HeteroGNN(torch.nn.Module):
-    def __init__(self, metadata, hidden_channels, out_channels, dropout, num_hosts, embedding_dim=32):
+    def __init__(self, metadata, hidden_channels, out_channels, dropout, num_hosts, embedding_dim=16):
         super().__init__()
         self.host_embedding = Embedding(num_hosts, embedding_dim)
         torch.nn.init.xavier_uniform_(self.host_embedding.weight)
 
+        # BatchNorm for full batch training (more stable here)
         self.norm1 = torch.nn.ModuleDict({
             node_type: torch.nn.BatchNorm1d(hidden_channels)
             for node_type in ['flow', 'host']
@@ -149,34 +151,57 @@ class HeteroGNN(torch.nn.Module):
         device = next(self.parameters()).device
         dtype = next(self.parameters()).dtype
 
-        x_dict['host'] = self.host_embedding.weight
-        x_dict['flow'] = x_dict['flow'].to(device=device, dtype=dtype)
+        # Host embedding: keep float32, let AMP cast if needed
+        x_dict['host'] = self.host_embedding.weight.to(device=device)
 
+        # Flow input: keep float32, normalization + clamp
+        x_dict['flow'] = x_dict['flow'].to(device=device)
+        x_dict['flow'] = (x_dict['flow'] - 0) / (1 + 1e-8)  # mean=0 std=1
+        x_dict['flow'] = torch.clamp(x_dict['flow'], -10, 10)
+
+        # First heterogeneous conv
         x_dict = self.conv1(x_dict, edge_index_dict)
-        x_dict = {k: self.norm1[k](v) for k, v in x_dict.items()}
-        x_dict = {k: F.relu(v) for k, v in x_dict.items()}
-        x_dict = {k: F.dropout(v, p=self.dropout, training=self.training) for k, v in x_dict.items()}
 
+        # BatchNorm1 + ReLU + clamp + Dropout (BatchNorm in float32)
+        for k in x_dict:
+            x = x_dict[k].to(torch.float32)  # ensure stable BatchNorm
+            x = self.norm1[k](x)
+            x = x.to(dtype)  # back to AMP dtype (float16) if used
+            x = F.relu(x)
+            x = torch.clamp(x, -1e2, 1e2)
+            x_dict[k] = F.dropout(x, p=self.dropout, training=self.training)
+
+        # Second heterogeneous conv
         x_dict = self.conv2(x_dict, edge_index_dict)
-        x_dict = {k: self.norm2[k](v) for k, v in x_dict.items()}
-        x_dict = {k: F.relu(v) for k, v in x_dict.items()}
-        x_dict = {k: F.dropout(v, p=self.dropout, training=self.training) for k, v in x_dict.items()}
 
+        # BatchNorm2 + ReLU + clamp + Dropout (BatchNorm in float32)
+        for k in x_dict:
+            x = x_dict[k].to(torch.float32)
+            x = self.norm2[k](x)
+            x = x.to(dtype)
+            x = F.relu(x)
+            x = torch.clamp(x, -1e2, 1e2)
+            x_dict[k] = F.dropout(x, p=self.dropout, training=self.training)
+
+        # Final linear layer on flow nodes
         out = self.lin(x_dict['flow'])
         return {'flow': out}
 
 
-def train(model, data, optimizer, criterion):
+def train(model, data, optimizer, criterion, scaler):
     model.train()
     optimizer.zero_grad(set_to_none=True)
 
     x_dict = {k: v.to(device=device) for k, v in data.x_dict.items()}
 
-    out = model(x_dict, data.edge_index_dict)
-    loss = criterion(out['flow'][data['flow'].train_mask], data['flow'].y[data['flow'].train_mask])
+    with autocast("cuda"):
+        out = model(x_dict, data.edge_index_dict)
 
-    loss.backward()
-    optimizer.step()
+        loss = criterion(out['flow'][data['flow'].train_mask], data['flow'].y[data['flow'].train_mask])
+
+    scaler.scale(loss).backward()
+    scaler.step(optimizer)
+    scaler.update()
 
     return loss.item()
 
@@ -216,7 +241,7 @@ def evaluate_accuracy(model, data, split='val'):
 
 
 def objective(trial):
-    hidden_channels = trial.suggest_categorical('hidden_channels', [16, 32])
+    hidden_channels = trial.suggest_categorical('hidden_channels', [64])
     dropout = trial.suggest_float('dropout', 0.0, 0.5)
     lr = trial.suggest_loguniform('lr', 1e-4, 1e-2)
 
@@ -225,7 +250,8 @@ def objective(trial):
         len(torch.unique(data['flow'].y)),
         dropout,
         num_hosts=num_hosts
-    ).to(device)
+    )
+    model = model.to(device)
 
     class_weights = compute_class_weight(class_weight='balanced',
                                          classes=np.unique(y_encoded),
@@ -242,9 +268,10 @@ def objective(trial):
     best_epoch = 0
     patience = 100
     max_epochs = 400
+    scaler = GradScaler("cuda")
 
     for epoch in range(1, max_epochs + 1):
-        loss = train(model, data, optimizer, criterion)
+        loss = train(model, data, optimizer, criterion, scaler)
         val_f1 = evaluate_f1(model, data, split='val')
         val_acc = evaluate_accuracy(model, data, split='val')
 
