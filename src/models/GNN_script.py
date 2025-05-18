@@ -292,7 +292,7 @@ def evaluate_accuracy(model, data, split='val'):
 
 
 def objective(trial):
-    hidden_channels = trial.suggest_categorical('hidden_channels', [16, 32, 64])
+    hidden_channels = trial.suggest_categorical('hidden_channels', [16, 32])
     dropout = trial.suggest_float('dropout', 0.1, 0.6)
     lr = trial.suggest_loguniform('lr', 1e-5, 1e-2)
     gamma = trial.suggest_float('gamma', 0.5, 5.0)
@@ -318,10 +318,13 @@ def objective(trial):
     best_val_f1 = 0
     best_val_acc = 0
     best_epoch = 0
-    patience = 50
     max_epochs = 400
     scaler = GradScaler("cuda")
     best_model_state = None
+    f1_history = []
+
+    patience_window = 30
+    min_improvement = 0.001
 
     for epoch in range(1, max_epochs + 1):
         loss = train(model, data, optimizer, criterion, scaler)
@@ -332,15 +335,20 @@ def objective(trial):
         writer.add_scalar("F1/val", val_f1, epoch)
         writer.add_scalar("Accuracy/val", val_acc, epoch)
 
+        f1_history.append(val_f1)
+
+        # Maintain sliding window of last N F1s
+        if len(f1_history) > patience_window:
+            f1_history.pop(0)
+            if max(f1_history) - min(f1_history) < min_improvement:
+                logging.info(f"Early stopping at epoch {epoch} (F1 stagnated < {min_improvement} over {patience_window} epochs)")
+                break
+
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
             best_val_acc = val_acc
             best_epoch = epoch
             best_model_state = model.state_dict()
-
-        if epoch - best_epoch >= patience:
-            logging.info(f"Early stopping at epoch {epoch} (no improvement for {patience} epochs)")
-            break
 
         logging.info(f"Trial {trial.number} Epoch {epoch:03d} | Loss: {loss:.4f} | Val F1: {val_f1:.4f}")
     if best_model_state is not None:
