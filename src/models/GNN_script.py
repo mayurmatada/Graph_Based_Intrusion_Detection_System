@@ -1,3 +1,4 @@
+import time
 from sklearn.metrics import accuracy_score
 from torch.nn import Linear, Embedding
 from torch_geometric.nn import SAGEConv, HeteroConv
@@ -118,17 +119,27 @@ class HeteroGNN(torch.nn.Module):
         super().__init__()
         self.host_embedding = Embedding(num_hosts, embedding_dim)
         torch.nn.init.xavier_uniform_(self.host_embedding.weight)
-        from torch.nn import BatchNorm1d
 
-        self.norm = torch.nn.ModuleDict({
-            node_type: BatchNorm1d(hidden_channels)
+        self.norm1 = torch.nn.ModuleDict({
+            node_type: torch.nn.BatchNorm1d(hidden_channels)
             for node_type in ['flow', 'host']
         })
+
+        self.norm2 = torch.nn.ModuleDict({
+            node_type: torch.nn.BatchNorm1d(hidden_channels)
+            for node_type in ['flow', 'host']
+        })
+
         self.conv1 = HeteroConv({
             ('host', 'src_of', 'flow'): SAGEConv((embedding_dim, flow_features.shape[1]), hidden_channels),
             ('host', 'dst_of', 'flow'): SAGEConv((embedding_dim, flow_features.shape[1]), hidden_channels),
             ('flow', 'rev_src_of', 'host'): SAGEConv((flow_features.shape[1], embedding_dim), hidden_channels),
             ('flow', 'rev_dst_of', 'host'): SAGEConv((flow_features.shape[1], embedding_dim), hidden_channels),
+        }, aggr='sum')
+
+        self.conv2 = HeteroConv({
+            edge_type: SAGEConv((hidden_channels, hidden_channels), hidden_channels)
+            for edge_type in metadata[1]
         }, aggr='sum')
 
         self.lin = Linear(hidden_channels, out_channels)
@@ -142,7 +153,12 @@ class HeteroGNN(torch.nn.Module):
         x_dict['flow'] = x_dict['flow'].to(device=device, dtype=dtype)
 
         x_dict = self.conv1(x_dict, edge_index_dict)
-        x_dict = {k: self.norm[k](v) for k, v in x_dict.items()}
+        x_dict = {k: self.norm1[k](v) for k, v in x_dict.items()}
+        x_dict = {k: F.relu(v) for k, v in x_dict.items()}
+        x_dict = {k: F.dropout(v, p=self.dropout, training=self.training) for k, v in x_dict.items()}
+
+        x_dict = self.conv2(x_dict, edge_index_dict)
+        x_dict = {k: self.norm2[k](v) for k, v in x_dict.items()}
         x_dict = {k: F.relu(v) for k, v in x_dict.items()}
         x_dict = {k: F.dropout(v, p=self.dropout, training=self.training) for k, v in x_dict.items()}
 
