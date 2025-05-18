@@ -135,12 +135,12 @@ class HeteroGNN(torch.nn.Module):
             ('host', 'dst_of', 'flow'): SAGEConv((embedding_dim, flow_features.shape[1]), hidden_channels),
             ('flow', 'rev_src_of', 'host'): SAGEConv((flow_features.shape[1], embedding_dim), hidden_channels),
             ('flow', 'rev_dst_of', 'host'): SAGEConv((flow_features.shape[1], embedding_dim), hidden_channels),
-        }, aggr='sum')
+        }, aggr='mean')
 
         self.conv2 = HeteroConv({
             edge_type: SAGEConv((hidden_channels, hidden_channels), hidden_channels)
             for edge_type in metadata[1]
-        }, aggr='sum')
+        }, aggr='mean')
 
         self.lin = Linear(hidden_channels, out_channels)
         self.dropout = dropout
