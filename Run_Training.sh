@@ -60,13 +60,13 @@ if lsof -i:6006 -t >/dev/null ; then
     kill -9 $(lsof -i:6006 -t)
 fi
 echo "Launching TensorBoard..."
-tensorboard --logdir "$TB_LOG_DIR" --port 6006 &
+tensorboard --logdir "$TB_LOG_DIR" --port 6006 --reload_interval 5 &
 
 echo "Launching Optuna Dashboard..."
 optuna-dashboard sqlite:///$OPTUNA_DB --port 8000 &
 
 # -------------------------
 # WAIT FOR TRAINING TO FINISH
-# -------------------------
+# -------------------------~
 wait $TRAIN_PID
 echo "Training completed."

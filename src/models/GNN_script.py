@@ -177,22 +177,35 @@ def objective(trial):
     criterion = torch.nn.CrossEntropyLoss(weight=class_weights_tensor)
 
     writer = SummaryWriter(log_dir=f"Parameter_Databases/Tensorboard/{trial.number}")
+
     best_val_f1 = 0
-    for epoch in range(1, 201):
+    best_epoch = 0
+    patience = 20
+    max_epochs = 400
+
+    for epoch in range(1, max_epochs + 1):
         loss = train(model, data, optimizer, criterion)
         val_f1 = evaluate_f1(model, data, split='val')
+
         if epoch % 5 == 0:
             writer.add_scalar("Loss/train", loss, epoch)
             writer.add_scalar("F1/val", val_f1, epoch)
-        best_val_f1 = max(best_val_f1, val_f1)
+
+        if val_f1 > best_val_f1:
+            best_val_f1 = val_f1
+            best_epoch = epoch
+
+        if epoch - best_epoch >= patience:
+            logging.info(f"Early stopping at epoch {epoch} (no improvement for {patience} epochs)")
+            break
+
         logging.info(f"Trial {trial.number} Epoch {epoch:03d} | Loss: {loss:.4f} | Val F1: {val_f1:.4f}")
+
     writer.flush()
     writer.close()
 
     del model, optimizer, criterion, writer
-
     gc.collect()
-
     torch.cuda.empty_cache()
 
     return best_val_f1
@@ -251,7 +264,7 @@ def train_and_return_f1(best_params, model_class, data, device='cuda', num_epoch
     with torch.no_grad():
         out = model(data.x_dict, data.edge_index_dict)
         mask = data['flow'].test_mask
-        logits = out[mask]
+        logits = out['flow'][mask]
         preds = logits.argmax(dim=1).cpu()
         labels = data['flow'].y[mask].cpu()
         y_pred.extend(preds.tolist())
