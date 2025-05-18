@@ -7,6 +7,7 @@ set -e  # Exit on error
 # -------------------------
 OPTUNA_DB="Parameter_Databases/Optuna/optuna_study.db"
 TB_LOG_DIR="Parameter_Databases/Tensorboard/"
+CHECKPOINT_DIR="Parameter_Databases/Checkpoints/"
 
 # -------------------------
 # CLEANUP
@@ -24,6 +25,14 @@ if [ -d "$TB_LOG_DIR" ]; then
 else
     mkdir -p "$TB_LOG_DIR"
     echo "Created TensorBoard log directory"
+fi
+
+if [ -d "$CHECKPOINT_DIR" ]; then
+    rm -rf "${CHECKPOINT_DIR:?}"/*
+    echo "Deleted contents of Checkpoints directory"
+else
+    mkdir -p "$CHECKPOINT_DIR"
+    echo "Created Checkpoints directory"
 fi
 
 # -------------------------

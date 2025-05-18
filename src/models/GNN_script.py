@@ -1,10 +1,10 @@
-import time
+from colorlog import ColoredFormatter
+from datetime import datetime
+import os
 from sklearn.metrics import accuracy_score
 from torch.nn import Linear, Embedding
 from torch_geometric.nn import SAGEConv, HeteroConv
 import optuna
-import os
-from datetime import datetime
 import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -13,21 +13,72 @@ from sklearn.metrics import f1_score, classification_report, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
 import torch.nn.functional as F
 from torch.nn import Linear
-from torch_geometric.nn import HeteroConv, GATConv
+from torch_geometric.nn import HeteroConv
 import polars as pl
 import numpy as np
 from sklearn.preprocessing import LabelEncoder
 import torch
 from torch_geometric.data import HeteroData
 import gc
-from torch_geometric.loader import NeighborLoader
 from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
+import warnings
+
+
+warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning)
+
+
+# Ensure log directory exists
+os.makedirs("logs", exist_ok=True)
+
+# Timestamped log file
+log_file = datetime.now().strftime("logs/run_%Y%m%d_%H%M%S.log")
+
+# ----------------------------
+# FORMATTERS
+# ----------------------------
+plain_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+color_format = ColoredFormatter(
+    "%(log_color)s%(asctime)s - %(levelname)s - %(message)s",
+    log_colors={
+        'DEBUG': 'cyan',
+        'INFO': 'green',
+        'WARNING': 'yellow',
+        'ERROR': 'red',
+        'CRITICAL': 'bold_red',
+    }
+)
+
+# ----------------------------
+# HANDLERS
+# ----------------------------
+file_handler = logging.FileHandler(log_file)
+file_handler.setFormatter(plain_format)
+
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(color_format)
+
+# ----------------------------
+# LOGGER
+# ----------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[file_handler, console_handler]
+)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.set_float32_matmul_precision('high')
 torch.manual_seed(42)
 
+
+logging.basicConfig(
+    level=logging.INFO,                      # Set logging level
+    format="%(asctime)s - %(levelname)s - %(message)s",  # Optional format
+    handlers=[                               # Explicitly set handlers
+        logging.StreamHandler()
+    ]
+)
 
 # Load data
 X = pl.read_parquet("data/Processed_and_split/Processed_X.parquet")
@@ -241,9 +292,10 @@ def evaluate_accuracy(model, data, split='val'):
 
 
 def objective(trial):
-    hidden_channels = trial.suggest_categorical('hidden_channels', [64])
-    dropout = trial.suggest_float('dropout', 0.0, 0.5)
-    lr = trial.suggest_loguniform('lr', 1e-4, 1e-2)
+    hidden_channels = trial.suggest_categorical('hidden_channels', [16, 32, 64])
+    dropout = trial.suggest_float('dropout', 0.1, 0.6)
+    lr = trial.suggest_loguniform('lr', 1e-5, 5e-2)
+    gamma = trial.suggest_float('gamma', 0.5, 5.0)
 
     model = HeteroGNN(
         data.metadata(), hidden_channels,
@@ -259,7 +311,7 @@ def objective(trial):
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = FocalLoss(alpha=class_weights_tensor, gamma=2.0)
+    criterion = FocalLoss(alpha=class_weights_tensor, gamma=gamma)
 
     writer = SummaryWriter(log_dir=f"Parameter_Databases/Tensorboard/{trial.number}")
 
@@ -269,6 +321,7 @@ def objective(trial):
     patience = 100
     max_epochs = 400
     scaler = GradScaler("cuda")
+    best_model_state = None
 
     for epoch in range(1, max_epochs + 1):
         loss = train(model, data, optimizer, criterion, scaler)
@@ -283,19 +336,23 @@ def objective(trial):
             best_val_f1 = val_f1
             best_val_acc = val_acc
             best_epoch = epoch
+            best_model_state = model.state_dict()
 
         if epoch - best_epoch >= patience:
             logging.info(f"Early stopping at epoch {epoch} (no improvement for {patience} epochs)")
             break
 
         logging.info(f"Trial {trial.number} Epoch {epoch:03d} | Loss: {loss:.4f} | Val F1: {val_f1:.4f}")
+    if best_model_state is not None:
+        torch.save(best_model_state, f"Parameter_Databases/Checkpoints/best_model_trial_{trial.number}.pt")
 
     # Log hyperparameters and final metrics
     writer.add_hparams(
         {
             'hidden_channels': hidden_channels,
             'dropout': dropout,
-            'lr': lr
+            'lr': lr,
+            'gamma': gamma
         },
         {
             'hparam/val_f1': best_val_f1,
@@ -323,7 +380,7 @@ study = optuna.create_study(
     storage=storage,
     load_if_exists=True,
 )
-study.optimize(objective, n_trials=20)
+study.optimize(objective, n_trials=100)
 
 print("Best hyperparams:", study.best_params)
 
