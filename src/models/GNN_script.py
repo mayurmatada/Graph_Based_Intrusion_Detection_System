@@ -294,7 +294,7 @@ def evaluate_accuracy(model, data, split='val'):
 def objective(trial):
     hidden_channels = trial.suggest_categorical('hidden_channels', [16, 32, 64])
     dropout = trial.suggest_float('dropout', 0.1, 0.6)
-    lr = trial.suggest_loguniform('lr', 1e-5, 5e-2)
+    lr = trial.suggest_loguniform('lr', 1e-5, 1e-2)
     gamma = trial.suggest_float('gamma', 0.5, 5.0)
 
     model = HeteroGNN(
@@ -318,7 +318,7 @@ def objective(trial):
     best_val_f1 = 0
     best_val_acc = 0
     best_epoch = 0
-    patience = 100
+    patience = 50
     max_epochs = 400
     scaler = GradScaler("cuda")
     best_model_state = None
@@ -391,6 +391,7 @@ def train_and_return_f1(best_params, model_class, data, device='cuda', num_epoch
     hidden_channels = best_params['hidden_channels']
     dropout = best_params['dropout']
     lr = best_params['lr']
+    gamma = best_params['gamma']
 
     num_classes = len(torch.unique(data['flow'].y))
     num_hosts = data['host'].x.size(0) if 'host' in data.node_types else 0
@@ -406,7 +407,7 @@ def train_and_return_f1(best_params, model_class, data, device='cuda', num_epoch
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = FocalLoss(alpha=class_weights_tensor, gamma=2.0)
+    criterion = FocalLoss(alpha=class_weights_tensor, gamma=gamma)
 
     writer = SummaryWriter(log_dir=f"Parameter_Databases/Tensorboard/final_model")
 
