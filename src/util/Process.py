@@ -7,10 +7,32 @@ from sklearn.compose import ColumnTransformer
 
 def load_and_combine_files(file_paths):
     """
-    Load CSV files and combine them into a single DataFrame.
-    Also removes ID column.
-    Downcasts All Columns.
+    Load and combine multiple CSV files into a single DataFrame.
+
+    This function reads a list of CSV file paths, processes each file by cleaning
+    and transforming the data, and combines them into a single pandas DataFrame.
+
+    Args:
+        file_paths (list of str): A list of file paths to the CSV files to be loaded.
+
+    Returns:
+        pandas.DataFrame: A combined DataFrame containing the processed data from all input files.
+
+    Processing Steps:
+        1. Reads each CSV file using `pandas.read_csv` with `cp1252` encoding.
+        2. Strips whitespace from column names.
+        3. Drops the columns 'Flow ID' and 'Timestamp'.
+        4. Converts specific columns to the 'category' data type for memory optimization.
+        5. Converts 'Source Port' and 'Destination Port' columns to integers and downcasts them.
+        6. Replaces infinite values with NaN.
+        7. Appends the processed DataFrame to a list.
+        8. Concatenates all processed DataFrames into a single DataFrame.
+
+    Notes:
+        - The function prints a message for each file processed.
+        - Infinite values in the data are replaced with NaN to handle invalid entries.
     """
+
     dfs = []
     for file_path in file_paths:
         df = pd.read_csv(file_path, encoding='cp1252')
@@ -52,10 +74,22 @@ def load_and_combine_files(file_paths):
 
 def downsample_benign(df: pd.DataFrame, label_col='Label'):
     """
-    Downsamples the benign class to balance the dataset.
-    Combines rare attacks (labels with <20000 samples) into 'RARE_ATTACK'.
-    Drops labels with <100 samples.
+    Downsamples the 'BENIGN' class in a DataFrame to balance it with attack classes.
+
+    This function performs the following steps:
+    1. Drops labels with fewer than 100 samples.
+    2. Combines labels with fewer than 20,000 samples (excluding 'BENIGN') into a new label 'RARE_ATTACK'.
+    3. Downsamples the 'BENIGN' class to match the number of samples in the attack classes, 
+       if there are enough 'BENIGN' samples and at least one attack sample.
+
+    Args:
+        df (pd.DataFrame): The input DataFrame containing the data to be processed.
+        label_col (str): The name of the column containing the class labels. Default is 'Label'.
+
+    Returns:
+        pd.DataFrame: A DataFrame with the 'BENIGN' class downsampled and rare attack classes relabeled.
     """
+
     counts = df[label_col].value_counts()
     # Drop labels with <100 samples
     valid_labels = counts[counts >= 100].index
@@ -95,8 +129,18 @@ def normalize_features(df, feature_cols):
 
 def process_data(file_paths, feature_cols):
     """
-    Combine, downsample, and normalize the data.
+    Processes the input data by loading, combining, downsampling, normalizing, 
+    and cleaning it.
+
+    Args:
+        file_paths (list of str): A list of file paths to the data files that need to be processed.
+        feature_cols (list of str): A list of column names to be normalized in the dataset.
+
+    Returns:
+        pandas.DataFrame: A processed DataFrame with combined, downsampled, normalized, 
+        and cleaned data.
     """
+
     df = load_and_combine_files(file_paths)
     df = downsample_benign(df)
     df = normalize_features(df, feature_cols)
@@ -105,6 +149,20 @@ def process_data(file_paths, feature_cols):
 
 
 def get_split_data(file_paths, feature_cols):
+    """
+    Processes the input data, applies one-hot encoding to categorical features, 
+    and splits the data into features (X) and labels (y).
+
+    Args:
+        file_paths (list of str): List of file paths to the data files to be processed.
+        feature_cols (list of str): List of feature column names to be used for processing.
+
+    Returns:
+        tuple: A tuple containing:
+            - X_transformed_df (pd.DataFrame): Transformed feature DataFrame with one-hot encoded 
+              categorical columns and preserved column names.
+            - y (pd.Series): Labels extracted from the 'Label' column of the input data.
+    """
     df = process_data(file_paths, feature_cols)
     categorical_cols = ['Fwd PSH Flags', 'Bwd PSH Flags', 'Fwd URG Flags',
                         'Bwd URG Flags', 'Protocol']
