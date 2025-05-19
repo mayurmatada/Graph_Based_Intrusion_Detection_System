@@ -366,6 +366,7 @@ def train(model, data, optimizer, criterion, scaler):
     Returns:
         float: The computed loss value for the current training iteration.
     """
+    device = torch_config()
     model.train()
     optimizer.zero_grad(set_to_none=True)
 
