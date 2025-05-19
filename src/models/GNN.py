@@ -25,7 +25,7 @@ from torch.amp.grad_scaler import GradScaler
 import warnings
 
 
-def initial_config():
+def logging_and_torch_config():
     """
     Initializes the environment for running GNN experiments.
 
@@ -82,9 +82,7 @@ def initial_config():
         handlers=[file_handler, console_handler]
     )
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    torch.set_float32_matmul_precision('high')
-    torch.manual_seed(42)
+    device = torch_config()
 
     logging.basicConfig(
         level=logging.INFO,                      # Set logging level
@@ -94,6 +92,13 @@ def initial_config():
         ]
     )
 
+    return device
+
+
+def torch_config():
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    torch.set_float32_matmul_precision('high')
+    torch.manual_seed(42)
     return device
 
 
@@ -164,7 +169,7 @@ def process_and_load_data(device):
 # Masks
 
 
-def split_masks(data, split=(0.7, 0.15, 0.15), seed=42):
+def split_masks(data, device, split=(0.7, 0.15, 0.15), seed=42):
     """
     Splits the nodes of the 'flow' graph in the input data into training, validation, and test sets,
     and creates corresponding boolean masks.
@@ -275,7 +280,7 @@ class HeteroGNN(torch.nn.Module):
             - 'flow': Tensor of shape [num_flow_nodes, out_channels]
     """
 
-    def __init__(self, metadata, hidden_channels, out_channels, dropout, num_hosts, embedding_dim=16):
+    def __init__(self, metadata, hidden_channels, out_channels, dropout, num_hosts, flow_features, embedding_dim=16):
         super().__init__()
         self.host_embedding = Embedding(num_hosts, embedding_dim)
         torch.nn.init.xavier_uniform_(self.host_embedding.weight)
@@ -413,6 +418,7 @@ def evaluate_f1(model, data, split='val'):
     Returns:
         float: The macro-averaged F1 score for the specified split.
     """
+    device = torch_config()
     model.eval()
     with torch.no_grad():
         x_dict = {k: v.to(device=device) for k, v in data.x_dict.items()}
@@ -481,7 +487,8 @@ def objective(trial):
         data.metadata(), hidden_channels,
         len(torch.unique(data['flow'].y)),
         dropout,
-        num_hosts=num_hosts
+        num_hosts=num_hosts,
+        flow_features=flow_features
     )
     model = model.to(device)
 
@@ -517,18 +524,21 @@ def objective(trial):
 
         f1_history.append(val_f1)
 
-        # Maintain sliding window of last N F1s
-        if len(f1_history) > patience_window:
-            f1_history.pop(0)
-            if max(f1_history) - min(f1_history) < min_improvement:
-                logging.info(f"Early stopping at epoch {epoch} (F1 stagnated < {min_improvement} over {patience_window} epochs)")
-                break
-
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
             best_val_acc = val_acc
             best_epoch = epoch
             best_model_state = model.state_dict()
+
+        # Maintain sliding window of last N F1s
+        if len(f1_history) > patience_window or best_val_f1 > 0.95:
+            f1_history.pop(0)
+            if max(f1_history) - min(f1_history) < min_improvement:
+                logging.info(f"Early stopping at epoch {epoch} (F1 stagnated < {min_improvement} over {patience_window} epochs)")
+                break
+            elif best_val_f1 > 0.95:
+                logging.info(f"Early stopping at epoch {epoch} (F1 cut at 0.95)")
+                break
 
         logging.info(f"Trial {trial.number} Epoch {epoch:03d} | Loss: {loss:.4f} | Val F1: {val_f1:.4f}")
     if best_model_state is not None:
@@ -541,7 +551,7 @@ def objective(trial):
             'lr': lr,
             'gamma': gamma,
             'best_epoch': best_epoch
-        }, f"{checkpoint_dir}/best_model_trial_{trial.number}.pt")
+        }, f"{checkpoint_dir}/trial_{trial.number}.pt")
 
     # Log hyperparameters and final metrics
     writer.add_hparams(
@@ -567,7 +577,7 @@ def objective(trial):
     return best_val_f1
 
 
-def optuna_optimize(data, split_masks, objective):
+def optuna_optimize(data, split_masks, objective, device):
     """
     Optimizes hyperparameters for a GNN model using Optuna.
 
@@ -581,7 +591,7 @@ def optuna_optimize(data, split_masks, objective):
     Returns:
         optuna.study.Study: The Optuna study object containing the optimization results.
     """
-    split_masks(data)
+    split_masks(data, device)
 
     storage = "sqlite:///Parameter_Databases/Optuna/optuna_study.db"
 
@@ -598,7 +608,7 @@ def optuna_optimize(data, split_masks, objective):
 
 
 if __name__ == "__main__":
-    device = initial_config()
+    device = logging_and_torch_config()
     num_hosts, flow_features, data, encoder, y_encoded = process_and_load_data(device)
-    split_masks(data)
-    study = optuna_optimize(data, split_masks, objective)
+    split_masks(data, device)
+    study = optuna_optimize(data, split_masks, objective, device)
