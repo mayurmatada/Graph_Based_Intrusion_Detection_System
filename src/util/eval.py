@@ -1,5 +1,3 @@
-from matplotlib.lines import Line2D
-import random
 from src.models.GNN import process_and_load_data, split_masks, HeteroGNN, torch_config, evaluate_f1
 import torch
 import logging
@@ -9,9 +7,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 from sklearn.preprocessing import label_binarize
-import networkx as nx
-
-from torch_geometric.utils import to_networkx
 
 # Colored logging formatter
 
@@ -39,6 +34,19 @@ logger = logging.getLogger(__name__)
 
 
 def load_model(device, data, num_hosts, flow_features, file):
+    """
+    Loads a pre-trained HeteroGNN model from a checkpoint file and prepares it for evaluation.
+
+    Args:
+        device (torch.device): The device to which the model should be moved (e.g., 'cpu' or 'cuda').
+        data (torch_geometric.data.HeteroData): The heterogeneous graph data object containing metadata.
+        num_hosts (int): The number of host nodes in the graph.
+        flow_features (int): The number of features for the 'flow' node type.
+        file (str): The filename of the checkpoint to load.
+
+    Returns:
+        HeteroGNN: The loaded model set to evaluation mode and moved to the specified device.
+    """
     logger.info(f"Loading model checkpoint: {file}")
     checkpoint = torch.load(f"Parameter_Databases/Checkpoints/{file}")
     model = HeteroGNN(
@@ -54,12 +62,45 @@ def load_model(device, data, num_hosts, flow_features, file):
 
 
 def get_F1s(device, num_hosts, flow_features, data, file):
+    """
+    Loads a model and evaluates its F1 score on the test dataset.
+
+    Args:
+        device (torch.device or str): The device to load the model onto (e.g., 'cpu' or 'cuda').
+        num_hosts (int): The number of hosts in the dataset.
+        flow_features (int): The number of features per network flow.
+        data (object): The dataset or data object required by the model and evaluation functions.
+        file (str): Path to the model file to be loaded.
+
+    Returns:
+        tuple: A tuple containing:
+            - F1_test (float): The F1 score of the model evaluated on the test set.
+            - model (object): The loaded model instance.
+    """
     model = load_model(device, data, num_hosts, flow_features, file)
     F1_test = evaluate_f1(model, data, 'test')
     return F1_test, model
 
 
 def generate_confusion_matrix(model, data, device, class_names=None):
+    """
+    Generates and saves a normalized confusion matrix heatmap for model predictions on the test set.
+
+    Args:
+        model (torch.nn.Module): The trained model to evaluate.
+        data (torch_geometric.data.HeteroData): The input data containing node features, edge indices, and masks.
+        device (torch.device): The device (CPU or CUDA) to run the model and data on.
+        class_names (list of str, optional): List of class names for labeling the confusion matrix axes. 
+            If None, unique labels from the data are used.
+
+    Side Effects:
+        - Saves the confusion matrix heatmap as 'Parameter_Databases/Graphs/confusion_matrix.png'.
+        - Logs the save operation.
+
+    Notes:
+        - The confusion matrix is row-normalized to show percentages.
+        - Only test set samples (where test_mask is True) are evaluated.
+    """
     model.eval()
     data = data.to(device)
 
@@ -102,6 +143,21 @@ def generate_confusion_matrix(model, data, device, class_names=None):
 
 
 def generate_roc_curve(model, data, device, class_names=None):
+    """
+    Generates and saves a ROC curve plot for a multi-class classification model.
+
+    Args:
+        model (torch.nn.Module): The trained model to evaluate.
+        data (torch_geometric.data.HeteroData): The input data containing features, edge indices, and labels.
+        device (torch.device): The device (CPU or CUDA) to run the model on.
+        class_names (list of str, optional): List of class names for labeling the ROC curves. If None, class indices are used.
+
+    Saves:
+        A ROC curve plot as 'Parameter_Databases/Graphs/roc_curve.png'.
+
+    Logs:
+        An info message indicating the ROC curve has been saved.
+    """
     model.eval()
     data = data.to(device)
     with torch.no_grad():
@@ -136,6 +192,21 @@ def generate_roc_curve(model, data, device, class_names=None):
 
 
 def generate_precision_recall_curve(model, data, device, class_names=None):
+    """
+    Generates and saves a precision-recall curve for each class using the provided model and data.
+
+    Args:
+        model (torch.nn.Module): The trained model to evaluate.
+        data (torch_geometric.data.HeteroData): The input data containing features, labels, and masks.
+        device (torch.device): The device (CPU or CUDA) to run the model on.
+        class_names (list of str, optional): List of class names for labeling the curves. If None, class indices are used.
+
+    Saves:
+        A PNG image of the precision-recall curves for all classes at 'Parameter_Databases/Graphs/precision_recall_curve.png'.
+
+    Logs:
+        An info message indicating the location of the saved precision-recall curve.
+    """
     model.eval()
     data = data.to(device)
     with torch.no_grad():
@@ -166,71 +237,6 @@ def generate_precision_recall_curve(model, data, device, class_names=None):
     plt.savefig("Parameter_Databases/Graphs/precision_recall_curve.png")
     plt.close()
     logger.info("Saved Precision-Recall curve as 'precision_recall_curve.png'")
-
-
-def visualize_hetero_graph(data, max_nodes=100, seed=42, show_labels=False):
-    random.seed(seed)
-    G = nx.Graph()
-
-    # Assign unique colors to node types
-    node_types = list(data.x_dict.keys())
-    cmap_nodes = plt.cm.get_cmap("tab20", len(node_types))
-    node_color_map = {ntype: cmap_nodes(i) for i, ntype in enumerate(node_types)}
-
-    node_ids = {}
-    for ntype in node_types:
-        all_idxs = list(range(data[ntype].num_nodes))
-        sampled_idxs = random.sample(all_idxs, min(max_nodes, len(all_idxs)))
-        for idx in sampled_idxs:
-            node_name = f"{ntype}_{idx}"
-            G.add_node(node_name, ntype=ntype)
-            node_ids[(ntype, idx)] = node_name
-
-    # Edge type coloring
-    edge_types = list(data.edge_index_dict.keys())
-    cmap_edges = plt.cm.get_cmap("Dark2", len(edge_types))
-    edge_color_map = {etype: cmap_edges(i) for i, etype in enumerate(edge_types)}
-    edge_colors = []
-
-    for etype in edge_types:
-        src_type, rel_type, dst_type = etype
-        edge_index = data[etype].edge_index
-        for src, dst in edge_index.t().tolist():
-            src_node = node_ids.get((src_type, src))
-            dst_node = node_ids.get((dst_type, dst))
-            if src_node and dst_node:
-                G.add_edge(src_node, dst_node, rel_type=rel_type)
-                edge_colors.append(edge_color_map[etype])
-
-    # Layout
-    pos = nx.spring_layout(G, seed=seed)
-
-    # Draw nodes
-    for ntype in node_types:
-        nodelist = [n for n, attr in G.nodes(data=True) if attr['ntype'] == ntype]
-        nx.draw_networkx_nodes(G, pos, nodelist=nodelist,
-                               node_color=[node_color_map[ntype]] * len(nodelist),  # type: ignore
-                               label=ntype, node_size=100)
-
-    # Draw edges
-    nx.draw_networkx_edges(G, pos, edge_color=edge_colors, width=1.0, alpha=0.6)  # type: ignore
-
-    # Draw labels (optional)
-    if show_labels or len(G.nodes) <= 100:
-        nx.draw_networkx_labels(G, pos, font_size=6)
-
-    # Custom legends
-    node_legend = [Line2D([0], [0], marker='o', color='w',
-                          markerfacecolor=color, label=ntype, markersize=6)
-                   for ntype, color in node_color_map.items()]
-    edge_legend = [Line2D([0], [0], color=color, label=f"{etype[1]}")
-                   for etype, color in edge_color_map.items()]
-
-    plt.legend(handles=node_legend + edge_legend, loc='best', fontsize='small')
-    plt.title("Sampled Heterogeneous Graph")
-    plt.axis("off")
-    plt.tight_layout()
-    plt.savefig("Parameter_Databases/Graphs/Graph.png")
 
 
 def main():
@@ -264,7 +270,6 @@ def main():
         generate_confusion_matrix(best_model, data, device, class_names=encoder.classes_)
         generate_roc_curve(best_model, data, device, class_names=encoder.classes_)
         generate_precision_recall_curve(best_model, data, device, class_names=encoder.classes_)
-        # visualize_hetero_graph(data)
 
     else:
         logger.error("No valid model found for visualization.")

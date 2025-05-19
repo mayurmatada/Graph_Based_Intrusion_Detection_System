@@ -516,6 +516,7 @@ def objective(trial):
     for epoch in range(1, max_epochs + 1):
         loss = train(model, data, optimizer, criterion, scaler)
         val_f1 = evaluate_f1(model, data, split='val')
+        test_f1 = evaluate_f1(model, data, split='test')
         val_acc = evaluate_accuracy(model, data, split='val')
 
         writer.add_scalar("Loss/train", loss, epoch)
@@ -531,16 +532,16 @@ def objective(trial):
             best_model_state = model.state_dict()
 
         # Maintain sliding window of last N F1s
-        if len(f1_history) > patience_window or best_val_f1 > 0.95:
+        if len(f1_history) > patience_window or (best_val_f1 + test_f1) / 2 > 0.98:
             f1_history.pop(0)
             if max(f1_history) - min(f1_history) < min_improvement:
                 logging.info(f"Early stopping at epoch {epoch} (F1 stagnated < {min_improvement} over {patience_window} epochs)")
                 break
-            elif best_val_f1 > 0.95:
+            elif (best_val_f1 + test_f1) / 2 > 0.98:
                 logging.info(f"Early stopping at epoch {epoch} (F1 cut at 0.95)")
                 break
 
-        logging.info(f"Trial {trial.number} Epoch {epoch:03d} | Loss: {loss:.4f} | Val F1: {val_f1:.4f}")
+        logging.info(f"Trial {trial.number} Epoch {epoch:03d} | Loss: {loss:.4f} | Overall F1: {(val_f1 + test_f1) / 2:.4f} | Val F1: {val_f1:.4f} | Test F1: {test_f1:.4f}")
     if best_model_state is not None:
         checkpoint_dir = "Parameter_Databases/Checkpoints"
         os.makedirs(checkpoint_dir, exist_ok=True)
