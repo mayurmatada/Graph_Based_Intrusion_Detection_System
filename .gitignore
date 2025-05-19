@@ -3,3 +3,4 @@ data
 Parameter_Databases
 logs
 *.pyc
+.vscode/settings.json

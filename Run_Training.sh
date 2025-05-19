@@ -39,7 +39,7 @@ fi
 # RUN EXPERIMENT IN BACKGROUND
 # -------------------------
 echo "Running training pipeline in background..."
-python src/models/GNN_script.py 
+python src/models/GNN.py 
 
 TRAIN_PID=$!
 echo "Training started with PID $TRAIN_PID"
